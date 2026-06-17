@@ -46,7 +46,11 @@ async def chat(req: ChatRequest):
     if not os.getenv("DEEPSEEK_API_KEY"):
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY is not set in .env")
 
-    reply = await run_agent(req.message, req.history)
+    try:
+        reply = await run_agent(req.message, req.history)
+    except Exception as exc:
+        logging.exception("Agent error")
+        raise HTTPException(status_code=500, detail=str(exc))
 
     updated_history = req.history + [
         {"role": "user", "content": req.message},
@@ -80,4 +84,4 @@ async def root():
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
