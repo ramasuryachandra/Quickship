@@ -18,17 +18,17 @@ import os
 import shutil
 import tempfile
 import logging
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
-# ─── Local agent imports ────────────────────────────────────────────────────
-# agent1.py and file_ingestion.py must be on the Python path (same directory)
 from agent1 import run_quickship_agent
 from file_ingestion import list_uploaded_files, remove_uploaded_file
+import security
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -43,15 +43,36 @@ app = FastAPI(
     title="QuickShip Chat API",
     description="REST interface for the QuickShip AI support agent.",
     version="1.0.0",
+    # Disable public API docs in production
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
-# Allow browser-based clients (adjust origins for production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["http://127.0.0.1:8888", "http://localhost:8888"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
 )
+
+
+# ─── Security headers middleware ─────────────────────────────────────────────
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"]  = "nosniff"
+    response.headers["X-Frame-Options"]          = "DENY"
+    response.headers["X-XSS-Protection"]         = "1; mode=block"
+    response.headers["Referrer-Policy"]          = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"]  = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:;"
+    )
+    return response
 
 # Temp directory for uploaded files during request processing
 UPLOAD_TEMP_DIR = tempfile.mkdtemp(prefix="quickship_uploads_")
@@ -121,35 +142,33 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
+@app.get("/", response_class=HTMLResponse)
+def frontend():
+    html = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(content=html)
+
+
 @app.get("/health", response_model=HealthResponse, tags=["Utility"])
 def health_check():
-    """Liveness probe — returns 200 when the service is up."""
     return HealthResponse(status="ok", version="1.0.0")
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-def chat(body: ChatRequest):
-    """
-    Send a plain-text message to the QuickShip agent.
+def chat(body: ChatRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info("[CHAT] ip=%s session=%s msg=%r", client_ip, body.session_id, body.message)
 
-    - **message**: The customer's question or request.
-    - **has_upload_context**: Set to `true` if the customer previously uploaded
-      a file and wants to ask follow-up questions about it.
-    - **session_id**: Optional opaque string forwarded back in the response for
-      client-side session tracking (not used internally).
-    """
-    logger.info(f"[CHAT] session={body.session_id} message={body.message!r}")
+    blocked, clean_message = security.check_and_sanitize(body.message, client_ip)
+    if blocked:
+        return ChatResponse(reply=blocked, session_id=body.session_id)
 
-    reply = run_quickship_agent(
-        user_input=body.message,
-        has_upload_context=body.has_upload_context,
-    )
-
+    reply = run_quickship_agent(user_input=clean_message, has_upload_context=body.has_upload_context)
     return ChatResponse(reply=reply, session_id=body.session_id)
 
 
 @app.post("/chat/upload", response_model=UploadChatResponse, tags=["Chat"])
 async def chat_with_upload(
+    request: Request,
     file: Annotated[UploadFile, File(description="PDF or TXT file to attach")],
     message: Annotated[
         str,
@@ -167,6 +186,14 @@ async def chat_with_upload(
     reply. The `upload_id` in the response can be used with `DELETE /files/{uid}`
     to remove the file later.
     """
+    client_ip = request.client.host if request.client else "unknown"
+
+    # ── Rate limit + attack scan on the accompanying message ────────────────
+    if message:
+        blocked, message = security.check_and_sanitize(message, client_ip)
+        if blocked:
+            return UploadChatResponse(reply=blocked)
+
     # ── Content-type guard ──────────────────────────────────────────────────
     content_type = file.content_type or ""
     # Strip charset suffix, e.g. "text/plain; charset=utf-8"
