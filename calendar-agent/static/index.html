@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Calendar Agent</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ── Header ── */
+    header {
+      width: 100%;
+      max-width: 760px;
+      padding: 18px 20px 10px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header .icon { font-size: 1.6rem; }
+    header h1 { font-size: 1.2rem; font-weight: 600; color: #f1f5f9; }
+    header p  { font-size: 0.78rem; color: #64748b; }
+
+    /* ── Upload bar ── */
+    #upload-bar {
+      width: 100%;
+      max-width: 760px;
+      padding: 0 20px 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #upload-bar label {
+      cursor: pointer;
+      background: #1e293b;
+      border: 1px dashed #334155;
+      border-radius: 8px;
+      padding: 7px 14px;
+      font-size: 0.82rem;
+      color: #94a3b8;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    #upload-bar label:hover { border-color: #6366f1; color: #c7d2fe; }
+    #upload-bar input[type="file"] { display: none; }
+    #cal-status {
+      font-size: 0.78rem;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: #1e293b;
+    }
+    #cal-status.loaded  { color: #4ade80; }
+    #cal-status.missing { color: #f87171; }
+
+    /* ── Messages ── */
+    #messages {
+      flex: 1;
+      width: 100%;
+      max-width: 760px;
+      padding: 10px 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+    }
+
+    .bubble {
+      max-width: 78%;
+      padding: 12px 16px;
+      border-radius: 16px;
+      line-height: 1.55;
+      font-size: 0.92rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble.user {
+      align-self: flex-end;
+      background: #4f46e5;
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.assistant {
+      align-self: flex-start;
+      background: #1e293b;
+      color: #e2e8f0;
+      border-bottom-left-radius: 4px;
+    }
+    .bubble.system {
+      align-self: center;
+      background: #0f172a;
+      color: #64748b;
+      font-size: 0.78rem;
+      border-radius: 8px;
+      padding: 6px 12px;
+      max-width: 90%;
+      text-align: center;
+    }
+
+    /* typing dots */
+    .typing { display: flex; gap: 5px; padding: 14px 16px; align-items: center; }
+    .typing span {
+      width: 7px; height: 7px; border-radius: 50%; background: #64748b;
+      animation: bounce 1.2s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.2s; }
+    .typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+      40% { transform: translateY(-6px); opacity: 1; }
+    }
+
+    /* ── Input bar ── */
+    #input-bar {
+      width: 100%;
+      max-width: 760px;
+      padding: 10px 20px 20px;
+      display: flex;
+      gap: 10px;
+    }
+    #user-input {
+      flex: 1;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      color: #e2e8f0;
+      font-size: 0.92rem;
+      padding: 12px 16px;
+      resize: none;
+      outline: none;
+      line-height: 1.4;
+      max-height: 140px;
+      transition: border-color 0.2s;
+    }
+    #user-input:focus { border-color: #6366f1; }
+    #user-input::placeholder { color: #475569; }
+
+    #send-btn {
+      background: #4f46e5;
+      border: none;
+      border-radius: 12px;
+      color: #fff;
+      cursor: pointer;
+      padding: 0 18px;
+      font-size: 1.1rem;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    #send-btn:hover:not(:disabled) { background: #4338ca; }
+    #send-btn:disabled { background: #1e293b; color: #334155; cursor: default; }
+
+    /* scrollbar */
+    #messages::-webkit-scrollbar { width: 5px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="icon">📅</span>
+  <div>
+    <h1>Calendar Agent</h1>
+    <p>Powered by DeepSeek · Reads your .ics calendar · Sends Gmail reminders</p>
+  </div>
+</header>
+
+<div id="upload-bar">
+  <label>
+    📎 Upload .ics calendar
+    <input type="file" id="ics-file" accept=".ics" />
+  </label>
+  <span id="cal-status" class="missing">No calendar loaded</span>
+</div>
+
+<div id="messages">
+  <div class="bubble system">
+    Say hello or ask something like "What's on my calendar today?" or "Remind me about tomorrow's standup."
+  </div>
+</div>
+
+<div id="input-bar">
+  <textarea
+    id="user-input"
+    rows="1"
+    placeholder="Ask about your calendar…"
+    autocomplete="off"
+  ></textarea>
+  <button id="send-btn" title="Send (Enter)">➤</button>
+</div>
+
+<script>
+  const messagesEl = document.getElementById("messages");
+  const inputEl    = document.getElementById("user-input");
+  const sendBtn    = document.getElementById("send-btn");
+  const icsFile    = document.getElementById("ics-file");
+  const calStatus  = document.getElementById("cal-status");
+
+  let history = [];
+
+  // ── Calendar status ──────────────────────────────────────────────────────
+  async function refreshCalStatus() {
+    try {
+      const r = await fetch("/calendar-status");
+      const d = await r.json();
+      calStatus.textContent = d.loaded ? "✓ Calendar loaded" : "No calendar loaded";
+      calStatus.className   = d.loaded ? "loaded" : "missing";
+    } catch {}
+  }
+  refreshCalStatus();
+
+  // ── Upload .ics ──────────────────────────────────────────────────────────
+  icsFile.addEventListener("change", async () => {
+    const file = icsFile.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/upload-calendar", { method: "POST", body: fd });
+      const d = await r.json();
+      appendBubble("system", d.message || d.detail || "Upload failed");
+      refreshCalStatus();
+    } catch (err) {
+      appendBubble("system", "Upload error: " + err.message);
+    }
+    icsFile.value = "";
+  });
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
+  function appendBubble(role, text) {
+    const div = document.createElement("div");
+    div.className = "bubble " + role;
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return div;
+  }
+
+  function showTyping() {
+    const div = document.createElement("div");
+    div.className = "bubble assistant typing";
+    div.innerHTML = "<span></span><span></span><span></span>";
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return div;
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    inputEl.value = "";
+    inputEl.style.height = "auto";
+    sendBtn.disabled = true;
+
+    appendBubble("user", text);
+    const indicator = showTyping();
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, history }),
+      });
+
+      indicator.remove();
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        appendBubble("system", "Error: " + (err.detail || res.statusText));
+        return;
+      }
+
+      const data = await res.json();
+      history = data.history;
+      appendBubble("assistant", data.response);
+    } catch (err) {
+      indicator.remove();
+      appendBubble("system", "Network error: " + err.message);
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener("click", sendMessage);
+
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // auto-resize textarea
+  inputEl.addEventListener("input", () => {
+    inputEl.style.height = "auto";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px";
+  });
+</script>
+</body>
+</html>
