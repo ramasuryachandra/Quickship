@@ -27,7 +27,6 @@ except ImportError:
 
 # --- Config ---
 CHROMA_DIR = "./chroma_db"
-UPLOAD_DIR = "./customer_uploads"
 MAX_FILE_SIZE_MB = 5
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 
@@ -41,8 +40,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 

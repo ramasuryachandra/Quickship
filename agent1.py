@@ -200,9 +200,14 @@ def run_quickship_agent(user_input: str, uploaded_file_path: str = None,
 
     # ── Step 2: Execute Strategy ─────────────────────────────────────────────
     if action == "RAG":
-    # Use customer docs if file uploaded this turn OR caller signals prior upload
         references_upload = has_customer_doc or has_upload_context or _query_references_upload(user_input)
         context = safe_rag_search(param, prefer_customer_docs=references_upload)
+        execution_result = f"Policy/Document Reference: {context}"
+
+    elif has_customer_doc or (has_upload_context and _query_references_upload(user_input)):
+        # File was just uploaded — always search it regardless of routing decision
+        query = user_input.strip() if user_input.strip() else "summarize the document"
+        context = safe_rag_search(query, prefer_customer_docs=True)
         execution_result = f"Policy/Document Reference: {context}"
 
     elif action == "DIRECT_REPLY" or not action:

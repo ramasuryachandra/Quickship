@@ -28,7 +28,11 @@ from pydantic import BaseModel, Field
 
 from agent1 import run_quickship_agent
 from file_ingestion import list_uploaded_files, remove_uploaded_file
+from database import init_db
 import security
+
+# Ensure DB tables and mock data exist on every startup
+init_db()
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
