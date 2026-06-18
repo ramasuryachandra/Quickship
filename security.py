@@ -16,6 +16,8 @@ Defence layers
 
 import re
 import time
+import hmac
+import hashlib
 import logging
 from collections import defaultdict
 from typing import Optional
@@ -157,3 +159,34 @@ def check_and_sanitize(text: str, client_ip: str = "unknown") -> tuple[str | Non
         return (BLOCKED_RESPONSE, "")
 
     return (None, clean)
+
+
+# ── Login brute-force protection ─────────────────────────────────────────────
+
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECS = 300  # 5-minute lockout after 5 failed attempts
+
+
+def check_login_rate_limit(client_ip: str) -> bool:
+    """Return True if this IP is allowed to attempt login, False if locked out."""
+    now = time.monotonic()
+    cutoff = now - LOGIN_LOCKOUT_SECS
+    _login_attempts[client_ip] = [t for t in _login_attempts[client_ip] if t > cutoff]
+    if len(_login_attempts[client_ip]) >= LOGIN_MAX_ATTEMPTS:
+        logger.warning("[LOGIN_BLOCKED] IP=%s exceeded %d attempts", client_ip, LOGIN_MAX_ATTEMPTS)
+        return False
+    return True
+
+
+def record_failed_login(client_ip: str) -> None:
+    _login_attempts[client_ip].append(time.monotonic())
+    logger.warning("[LOGIN_FAIL] IP=%s attempts=%d", client_ip, len(_login_attempts[client_ip]))
+
+
+def constant_time_compare(a: str, b: str) -> bool:
+    """Timing-safe string comparison — prevents timing attacks on credentials."""
+    return hmac.compare_digest(
+        hashlib.sha256(a.encode()).digest(),
+        hashlib.sha256(b.encode()).digest(),
+    )

@@ -15,13 +15,15 @@ Usage:
 """
 
 import os
+import secrets
 import shutil
 import tempfile
+import time
 import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
@@ -30,6 +32,41 @@ from agent1 import run_quickship_agent
 from file_ingestion import list_uploaded_files, remove_uploaded_file
 from database import init_db
 import security
+
+
+# ── Session store (in-memory, 2-hour TTL) ───────────────────────────────────
+
+class _SessionStore:
+    def __init__(self, ttl: int = 7200):
+        self._store: dict[str, float] = {}
+        self._ttl = ttl
+
+    def create(self) -> str:
+        token = secrets.token_hex(32)
+        self._store[token] = time.monotonic() + self._ttl
+        return token
+
+    def valid(self, token: str) -> bool:
+        expiry = self._store.get(token)
+        if expiry is None:
+            return False
+        if time.monotonic() > expiry:
+            del self._store[token]
+            return False
+        return True
+
+    def revoke(self, token: str) -> None:
+        self._store.pop(token, None)
+
+
+_sessions = _SessionStore()
+
+
+def _require_auth(x_session_token: str = Header(default="")) -> str:
+    """FastAPI dependency — rejects requests without a valid session token."""
+    if not _sessions.valid(x_session_token):
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+    return x_session_token
 
 # Ensure DB tables and mock data exist on every startup
 init_db()
@@ -91,6 +128,14 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 # ─── Request / Response models ────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginResponse(BaseModel):
+    token: str
+    message: str
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="Customer message")
@@ -157,8 +202,33 @@ def health_check():
     return HealthResponse(status="ok", version="1.0.0")
 
 
+@app.post("/login", response_model=LoginResponse)
+def login(body: LoginRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+
+    if not security.check_login_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+
+    valid_user = security.constant_time_compare(body.username, os.getenv("AGENT_USERNAME", ""))
+    valid_pass = security.constant_time_compare(body.password, os.getenv("AGENT_PASSWORD", ""))
+
+    if not (valid_user and valid_pass):
+        security.record_failed_login(client_ip)
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+    token = _sessions.create()
+    logger.info("[LOGIN] ip=%s authenticated", client_ip)
+    return LoginResponse(token=token, message="Login successful.")
+
+
+@app.post("/logout")
+def logout(token: str = Header(default="", alias="x-session-token")):
+    _sessions.revoke(token)
+    return {"message": "Logged out."}
+
+
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-def chat(body: ChatRequest, request: Request):
+def chat(body: ChatRequest, request: Request, _: str = Depends(_require_auth)):
     client_ip = request.client.host if request.client else "unknown"
     logger.info("[CHAT] ip=%s session=%s msg=%r", client_ip, body.session_id, body.message)
 
@@ -178,6 +248,7 @@ async def chat_with_upload(
         str,
         Form(description="Optional customer message about the file (can be empty)"),
     ] = "",
+    _: str = Depends(_require_auth),
 ):
     """
     Upload a file and (optionally) ask a question about it in one request.
@@ -271,7 +342,7 @@ async def chat_with_upload(
 
 
 @app.get("/files", response_model=FilesResponse, tags=["Files"])
-def get_uploaded_files():
+def get_uploaded_files(_: str = Depends(_require_auth)):
     """
     List all customer-uploaded files currently stored in the vector database.
     Returns metadata: upload_id, filename, and chunk count.
@@ -294,7 +365,7 @@ def get_uploaded_files():
 
 
 @app.delete("/files/{upload_id}", response_model=DeleteResponse, tags=["Files"])
-def delete_uploaded_file(upload_id: str):
+def delete_uploaded_file(upload_id: str, _: str = Depends(_require_auth)):
     """
     Remove a previously uploaded file from the vector store by its `upload_id`.
     All embedded chunks for that file are permanently deleted.
